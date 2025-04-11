@@ -1,0 +1,23 @@
+Author: Muhammad Ahmed Asif  
+Date: April 10, 2025  
+Email: ahmadoasif@gmail.com  
+
+Description:  
+This script is a video/audio downloader using yt-dlp.  
+It allows the user to download content from a list of URLs provided in a 'videos.txt' file, with format selection support and download enhancements via aria2c.
+
+Features:
+- Supports both audio and video downloads.
+- Interactive format selection.
+- Organizes downloaded content into 'Audios' and 'Videos' folders.
+- Integrates aria2c for faster downloads (if available).
+- Converts audio to MP3 using FFmpeg.
+
+Dependencies:
+- Python 3.x
+- yt-dlp
+- FFmpeg (for audio conversion)
+- aria2c (optional, for external downloading)
+
+License:
+MIT License
