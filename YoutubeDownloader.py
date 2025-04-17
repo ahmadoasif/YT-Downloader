@@ -1,186 +1,121 @@
+import json
 import os
-import subprocess
 import sys
-import importlib.util
-from shutil import which
+from datetime import datetime
+from yt_dlp import YoutubeDL
 
-def install_package(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+# Load config
+CONFIG_PATH = 'config.json'
+if not os.path.exists(CONFIG_PATH):
+    print("❌ Config file not found.")
+    sys.exit(1)
 
-def ensure_yt_dlp():
-    if importlib.util.find_spec("yt_dlp") is None:
-        print("Installing yt-dlp...")
-        install_package("yt-dlp")
+with open(CONFIG_PATH, 'r') as f:
+    config = json.load(f)
 
-def check_ffmpeg():
-    return which("ffmpeg") is not None
+preferred_quality = config.get("preferred_quality", "1080p").replace("p", "")
+playlist_mode = config.get("playlist_mode", False)
+use_external_downloader = config.get("use_external_downloader", False)
 
-def check_aria2c():
-    return which("aria2c") is not None
+# Ensure Videos folder exists
+os.makedirs('Videos', exist_ok=True)
 
-def download_video(url, path):
-    from yt_dlp import YoutubeDL
+# Log file (store in same directory as script)
+LOG_FILE = os.path.join(os.path.dirname(__file__), 'download_log.txt')
 
-    audio_only = input("\n🔈 Do you want to download only audio? (y/N): ").strip().lower() == 'y'
+# Build format string with fallback to lower quality
+def build_format_string():
+    fallback_qualities = [1080, 720, 480, 360, 240, 144]
+    quality_list = [q for q in fallback_qualities if q <= int(preferred_quality)]
 
-    print(f"\n🔍 Fetching available formats for: {url}")
-    try:
-        with YoutubeDL({'quiet': True}) as ydl:
-            info = ydl.extract_info(url, download=False)
-            formats = info.get('formats', [])
-    except Exception as e:
-        print(f"❌ Failed to fetch formats: {e}")
-        input("Press Enter to continue...")
-        return
+    format_list = []
+    for q in quality_list:
+        format_string = (
+            f"bestvideo[height={q}][ext=mp4]+bestaudio[ext=m4a]/"
+            f"best[height={q}][ext=mp4]/"
+            f"best[height<={q}][ext=mp4]"
+        )
+        format_list.append(format_string)
 
-    # Determine download folder based on the type (audio or video)
-    if audio_only:
-        download_folder = os.path.join(path if path else '.', 'Audios')
-    else:
-        download_folder = os.path.join(path if path else '.', 'Videos')
+    return "/".join(format_list)
 
-    # Create the folder if it doesn't exist
-    if not os.path.exists(download_folder):
-        os.makedirs(download_folder)
+# yt-dlp options
+ydl_opts = {
+    'format': build_format_string(),
+    'outtmpl': 'Videos/%(title)s.%(ext)s',  # Download directly to Videos folder
+    'noplaylist': not playlist_mode,
+    'merge_output_format': 'mp4',
+    'quiet': False,
+    'no_warnings': True,
+}
 
-    output_path = os.path.join(download_folder, '%(title)s.%(ext)s')
+# External downloader support
+if use_external_downloader:
+    ydl_opts.update({
+        'external_downloader': 'aria2c',
+        'external_downloader_args': ['-x', '16', '-k', '1M']
+    })
 
-    common_options = {
-        'outtmpl': output_path,
-        'noplaylist': True,
-        'no_mtime': True,
-        'retries': 10,
-        'fragment_retries': 10,
-        'progress_hooks': [lambda d: print(f"Downloading... {d['_percent_str']}")],
-    }
+# Log downloaded video info
+def log_download(info):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    title = info.get('title', 'Unknown')
+    resolution = info.get('resolution', f"{info.get('height', 'Unknown')}p")
+    format_id = info.get('format', 'Unknown')
 
-    if check_aria2c():
-        common_options.update({
-            'external_downloader': 'aria2c',
-            'external_downloader_args': ['-x', '16', '-k', '1M'],
-        })
+    log_entry = f"[{now}] Title: {title} | Resolution: {resolution} | Format: {format_id}\n"
+    with open(LOG_FILE, 'a', encoding='utf-8') as log_file:
+        log_file.write(log_entry)
 
-    if audio_only:
-        audio_formats = [f for f in formats if f.get('vcodec') == 'none']
-        if not audio_formats:
-            print("⚠️ No downloadable audio formats found.")
-            input("Press Enter to continue...")
-            return
+# Show downloaded quality
+def show_downloaded_quality(info):
+    video_format = info.get('format', 'Unknown')
+    height = info.get('height', 'Unknown')
+    resolution = info.get('resolution', f"{height}p")
+    has_audio = info.get('acodec', 'none') != 'none'
+    has_video = info.get('vcodec', 'none') != 'none'
 
-        print("\n🎧 Available audio formats:")
-        for idx, f in enumerate(audio_formats):
-            fmt_id = f['format_id']
-            abr = f.get('abr', '?')
-            ext = f.get('ext', '?')
-            size = f.get('filesize', 0)
-            size_str = f"{size / (1024 * 1024):.2f} MB" if size else "?"
-            print(f"{idx + 1}. ID: {fmt_id} | {abr} kbps | {ext} | {size_str}")
+    print("\n✅ Download Summary:")
+    print(f"📹 Title: {info.get('title', 'Unknown')}")
+    print(f"🎞️  Format: {video_format}")
+    print(f"📏 Resolution: {resolution}")
+    print(f"🔊 Audio: {'Yes' if has_audio else 'No'}")
+    print(f"🎥 Video: {'Yes' if has_video else 'No'}")
+    print("-" * 40)
 
+# Download function
+def download_video(url):
+    with YoutubeDL(ydl_opts) as ydl:
         try:
-            choice = int(input("\nEnter the number of the format you want to download: ")) - 1
-            selected_format = audio_formats[choice]['format_id']
-        except (ValueError, IndexError):
-            print("❌ Invalid choice.")
-            input("Press Enter to continue...")
-            return
+            info = ydl.extract_info(url, download=True)
+            entries = info['entries'] if 'entries' in info else [info]
 
-        options = {
-            'format': selected_format,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'merge_output_format': 'mp3',
-        }
-        options.update(common_options)
+            for entry in entries:
+                show_downloaded_quality(entry)
+                log_download(entry)
 
-        print(f"\n🔊 Downloading audio format ID '{selected_format}'...")
+        except Exception as e:
+            print(f"❌ Error downloading video: {e}")
 
-    else:
-        video_formats = [
-            f for f in formats
-            if f.get('format_id') and ('video' in f.get('format_note', '') or f.get('vcodec') != 'none')
-        ]
-        if not video_formats:
-            print("⚠️ No downloadable video formats found.")
-            input("Press Enter to continue...")
-            return
-
-        print("\n🎞️ Available video formats:")
-        for idx, f in enumerate(video_formats):
-            fmt_id = f['format_id']
-            res = f.get('format_note', '') or f.get('height', 'unknown')
-            ext = f.get('ext', '?')
-            size = f.get('filesize', 0)
-            size_str = f"{size / (1024 * 1024):.2f} MB" if size else "?"
-            print(f"{idx + 1}. ID: {fmt_id} | {res} | {ext} | {size_str}")
-
-        try:
-            choice = int(input("\nEnter the number of the format you want to download: ")) - 1
-            selected_format = video_formats[choice]['format_id']
-        except (ValueError, IndexError):
-            print("❌ Invalid choice.")
-            input("Press Enter to continue...")
-            return
-
-        options = {
-            'format': selected_format,
-            'merge_output_format': 'mp4',
-        }
-        options.update(common_options)
-
-        print(f"\n⬇️ Downloading video format ID '{selected_format}'...")
-
-    try:
-        with YoutubeDL(options) as ydl:
-            ydl.download([url])
-        print("✅ Download completed!")
-    except Exception as e:
-        print(f"❌ Error during download: {e}")
-
-    input("Press Enter to continue...")
-
-def load_urls_from_file(file_path="videos.txt"):
-    urls = []
-    try:
-        with open(file_path, 'r') as file:
-            urls = [line.strip() for line in file if line.strip()]
-    except Exception as e:
-        print(f"❌ Could not read file: {e}")
-    return urls
-
-def main():
-    ensure_yt_dlp()
-
-    if not check_ffmpeg():
-        print("⚠️ FFmpeg is not installed or not in PATH.")
-        print("Download it from https://ffmpeg.org/download.html\n")
-
-    if not check_aria2c():
-        print("⚠️ aria2c not found. Download speed will be slower without it.")
-        print("Download aria2 from https://github.com/aria2/aria2/releases\n")
-
-    current_dir = os.getcwd()
-    txt_path = os.path.join(current_dir, "videos.txt")
-
-    if not os.path.exists(txt_path):
-        print(f"❌ No 'videos.txt' found in {current_dir}. Exiting.")
+# Entry point
+if __name__ == "__main__":
+    if not os.path.exists("videos.txt"):
+        print("❌ videos.txt file not found.")
         input("Press Enter to exit...")
-        return
+        sys.exit(1)
 
-    print(f"Loading URLs from: {txt_path}")
-    urls = load_urls_from_file(txt_path)
+    with open("videos.txt", "r") as f:
+        urls = [line.strip() for line in f if line.strip()]
 
     if not urls:
-        print("⚠️ No URLs found in 'videos.txt'. Exiting.")
+        print("❌ videos.txt is empty.")
         input("Press Enter to exit...")
-        return
+        sys.exit(1)
 
-    path = input("Enter the path to save the videos (leave blank for current directory): ").strip()
-
+    print(f"🔽 Starting download of {len(urls)} video(s)...")
     for url in urls:
-        download_video(url, path)
+        print(f"\n📥 Downloading: {url}")
+        download_video(url)
 
-if __name__ == "__main__":
-    main()
+    print("\n✅ All downloads finished!")
+    input("Press Enter to exit...")
